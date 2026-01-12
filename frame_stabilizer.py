@@ -1,11 +1,11 @@
-import numpy as np
 import cv2
+import numpy as np
 from collections import deque
 
-MINIMUM_POINTS = 10
-MAX_CORNERS = 200
-QUALITY_LEVEL = 0.01
-MIN_DISTANCE = 30
+MAX_CORNERS = 200  # Maximum number of corners to detect in each frame using goodFeaturesToTrack
+MINIMUM_POINTS = 10  # Minimum number of valid tracked points required to estimate a reliable transform
+MIN_DISTANCE = 30  # Minimum Euclidean distance (in pixels) between detected corners to avoid clustering
+QUALITY_LEVEL = 0.01  # Minimum accepted quality of image corners (relative to the best corner); lower = more corners
 
 
 class FrameStabilizer:
@@ -19,25 +19,12 @@ class FrameStabilizer:
             Height of the video frames to be stabilized.
         buffer_size : int, optional
             Maximum number of frames/motions stored in buffers.
-
-        Attributes
-        ----------
-        prev_smooth_trajectory : np.ndarray
-            Smoothed motion vector from the previous frame, used for exponential smoothing.
-        cumulative_motion : np.ndarray
-            Accumulated motion vector (dx, dy, d_theta) up to the current frame.
-        frame_buffer : collections.deque
-            Circular buffer storing recent raw frames.
-        grayscale_buffer : collections.deque
-            Circular buffer storing recent grayscale frames.
-        cumulative_motion_buffer : collections.deque
-            Circular buffer storing cumulative motion vectors for each frame.
         """
         self.width = width
         self.height = height
         self.buffer_size = buffer_size
 
-        self.prev_smooth_trajectory = np.zeros(3, dtype=np.float64)
+        self.previous_smooth_trajectory = np.zeros(3, dtype=np.float64)
         self.cumulative_motion = np.zeros(3, dtype=np.float64)
 
         self._init_buffers()
@@ -95,42 +82,15 @@ class FrameStabilizer:
         if len(previous_points) < MINIMUM_POINTS: return self._append_last_motion_and_return()
 
         # Estimate affine transform (translation + rotation only)
-        m, _ = cv2.estimateAffinePartial2D(previous_points, current_points)
-        if m is None: return self._append_last_motion_and_return()
+        transformation_matrix, _ = cv2.estimateAffinePartial2D(previous_points, current_points)
+        if transformation_matrix is None: return self._append_last_motion_and_return()
 
-        dx = m[0, 2]
-        dy = m[1, 2]
-        d_theta = np.arctan2(m[1, 0], m[0, 0])
+        dx = transformation_matrix[0, 2]
+        dy = transformation_matrix[1, 2]
+        d_theta = np.arctan2(transformation_matrix[1, 0], transformation_matrix[0, 0])
 
         self.cumulative_motion += np.array([dx, dy, d_theta])
         self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
-
-    def apply_trajectory_smoothing(self) -> np.ndarray:
-
-        """
-        Applies trajectory smoothing to the most recent frame using motion correction.
-
-        This method computes the difference between the smoothed motion trajectory and the
-        actual cumulative motion, constructs a corrective affine transform, and applies it
-        to the latest frame in the buffer to produce a stabilized output.
-
-        Returns
-        -------
-        np.ndarray of shape (height, width, 3)
-            The stabilized video frame with camera motion compensated.
-        """
-        if not self.frame_buffer:
-            raise ValueError("Frame buffer is empty — cannot stabilize frame.")
-
-        # Compute the difference between smoothed and actual motion
-        correction = self.compute_smoothed_motion() - self.cumulative_motion
-        dx_c, dy_c, da_c = correction
-
-        M = self.build_affine(dx_c, dy_c, da_c)
-
-        frame_to_stabilize = self.frame_buffer[-1]
-        stabilized_frame = cv2.warpAffine(frame_to_stabilize, M, (self.width, self.height))
-        return stabilized_frame
 
     def compute_smoothed_motion(self, alpha: float = 0.02) -> np.ndarray:
         """
@@ -153,28 +113,55 @@ class FrameStabilizer:
             da is the rotation angle in radians.
         """
         current = self.cumulative_motion
-        smooth = alpha * current + (1 - alpha) * self.prev_smooth_trajectory
-        self.prev_smooth_trajectory = smooth
+        smooth = alpha * current + (1 - alpha) * self.previous_smooth_trajectory
+        self.previous_smooth_trajectory = smooth
         return smooth
+
+    def apply_trajectory_smoothing(self) -> np.ndarray:
+
+        """
+        Applies trajectory smoothing to the most recent frame using motion correction.
+
+        This method computes the difference between the smoothed motion trajectory and the
+        actual cumulative motion, constructs a corrective affine transform, and applies it
+        to the latest frame in the buffer to produce a stabilized output.
+
+        Returns
+        -------
+        np.ndarray of shape (height, width, 3)
+            The stabilized video frame with camera motion compensated.
+        """
+        if not self.frame_buffer:
+            raise ValueError("Frame buffer is empty — cannot stabilize frame.")
+
+        # Compute the difference between smoothed and actual motion
+        correction = self.compute_smoothed_motion() - self.cumulative_motion
+        dx_c, dy_c, da_c = correction
+
+        transformation_matrix = self.build_affine_transform(dx_c, dy_c, da_c)
+
+        frame_to_stabilize = self.frame_buffer[-1]
+        stabilized_frame = cv2.warpAffine(frame_to_stabilize, transformation_matrix, (self.width, self.height))
+        return stabilized_frame
 
     def append_raw_frame(self, frame: np.ndarray) -> None:
         self.frame_buffer.append(frame)
         self.grayscale_buffer.append(self.make_grayscale(frame))
+
+    def _append_last_motion_and_return(self) -> None:
+        self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
 
     def _init_buffers(self) -> None:
         self.frame_buffer = deque(maxlen=self.buffer_size)
         self.grayscale_buffer = deque(maxlen=self.buffer_size)
         self.cumulative_motion_buffer = deque(maxlen=self.buffer_size)
 
-    def _append_last_motion_and_return(self) -> None:
-        self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
-
     @staticmethod
     def make_grayscale(frame: np.ndarray) -> np.ndarray:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     @staticmethod
-    def build_affine(dx: float, dy: float, d_theta: float) -> np.ndarray:
+    def build_affine_transform(dx: float, dy: float, d_theta: float) -> np.ndarray:
         """
         Constructs a 2D affine transformation matrix for translation and rotation.
 
