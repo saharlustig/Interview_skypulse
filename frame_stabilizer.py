@@ -9,6 +9,7 @@ class FrameStabilizer:
         self.height = height
         self.buffer_size = buffer_size
 
+        self.prev_smooth = np.zeros(3, dtype=np.float64)
         self.frame_buffer = deque(maxlen=self.buffer_size)
         self.gray_buffer = deque(maxlen=self.buffer_size)
         self.transform_buffer = deque(maxlen=self.buffer_size)
@@ -22,10 +23,10 @@ class FrameStabilizer:
     def stabilize(self, frame):
         self.append_raw_frame(frame)
         if len(self.frame_buffer) > 1: self.estimate_transform()
-        if len(self.frame_buffer) == self.buffer_size:
-            smoothed_frame = self.smooth_frame()
-            return smoothed_frame
-        return frame
+        # if len(self.frame_buffer) == self.buffer_size:
+        smoothed_frame = self.smooth_frame()
+        return smoothed_frame
+        # return frame
 
     def smooth_frame(self):
         # only output when buffer is full
@@ -33,7 +34,7 @@ class FrameStabilizer:
         smooth_traj = self.smooth_trajectory()
 
         # center frame trajectory
-        center_traj = self.trajectory_buffer[self.middle_buffer_frame]
+        center_traj = self.cumulative_trajectory
 
         # correction = smoothed - original
         correction = smooth_traj - center_traj
@@ -41,8 +42,8 @@ class FrameStabilizer:
 
         M = self.build_affine(dx_c, dy_c, da_c)
 
-        center_frame = self.frame_buffer[self.middle_buffer_frame]
-        stabilized = cv2.warpAffine(center_frame, M, (self.width, self.height))
+        frame_to_stabilize = self.frame_buffer[-1]
+        stabilized = cv2.warpAffine(frame_to_stabilize, M, (self.width, self.height))
         return stabilized
 
     def append_raw_frame(self, frame):
@@ -78,9 +79,11 @@ class FrameStabilizer:
     def make_grayscale(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    def smooth_trajectory(self):
-        arr = np.array(self.trajectory_buffer)
-        return np.mean(arr, axis=0)
+    def smooth_trajectory(self, alpha=0.02):
+        current = self.cumulative_trajectory
+        smooth = alpha * current + (1 - alpha) * self.prev_smooth
+        self.prev_smooth = smooth
+        return smooth
 
     @staticmethod
     def build_affine(dx, dy, da):

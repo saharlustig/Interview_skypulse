@@ -1,2 +1,3 @@
 video_dir_relative: 'data'
 video_name: 'shaky_video.mp4'
+output_video_name: 'sahar_lustig_output.mp4'
