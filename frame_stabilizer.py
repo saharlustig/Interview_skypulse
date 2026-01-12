@@ -2,6 +2,11 @@ import numpy as np
 import cv2
 from collections import deque
 
+MINIMUM_POINTS = 10
+MAX_CORNERS = 200
+QUALITY_LEVEL = 0.01
+MIN_DISTANCE = 30
+
 
 class FrameStabilizer:
     def __init__(self, width, height, buffer_size=10):
@@ -10,16 +15,35 @@ class FrameStabilizer:
         self.buffer_size = buffer_size
 
         self.prev_smooth_trajectory = np.zeros(3, dtype=np.float64)
-        self.frame_buffer = deque(maxlen=self.buffer_size)
-        self.grayscale_buffer = deque(maxlen=self.buffer_size)
-        self.cumulative_motion_buffer = deque(maxlen=self.buffer_size)
         self.cumulative_motion = np.zeros(3, dtype=np.float64)
+
+        self._init_buffers()
 
     def stabilize(self, frame):
         self.append_raw_frame(frame)
-        if len(self.frame_buffer) > 1: self.estimate_transform()
-        smoothed_frame = self.smooth_frame()
-        return smoothed_frame
+        if len(self.frame_buffer) > 1: self.estimate_frame_transform()
+        return self.smooth_frame()
+
+    def estimate_frame_transform(self):
+        previous_points = cv2.goodFeaturesToTrack(self.grayscale_buffer[-2], MAX_CORNERS, QUALITY_LEVEL, MIN_DISTANCE)
+        if previous_points is None: self._append_last_motion_and_return()
+
+        current_points, status, _ = cv2.calcOpticalFlowPyrLK(self.grayscale_buffer[-2], self.grayscale_buffer[-1],
+                                                             previous_points, None)
+        status = np.squeeze(status)
+        previous_points, current_points = (previous_points[status == 1], current_points[status == 1])
+
+        if len(previous_points) < MINIMUM_POINTS: self._append_last_motion_and_return()
+
+        m, _ = cv2.estimateAffinePartial2D(previous_points, current_points)
+        if m is None: self._append_last_motion_and_return()
+
+        dx = m[0, 2]
+        dy = m[1, 2]
+        da = np.arctan2(m[1, 0], m[0, 0])
+
+        self.cumulative_motion += np.array([dx, dy, da])
+        self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
 
     def smooth_frame(self):
         correction = self.smooth_trajectory() - self.cumulative_motion
@@ -33,36 +57,7 @@ class FrameStabilizer:
 
     def append_raw_frame(self, frame):
         self.frame_buffer.append(frame)
-        self.grayscale_buffer.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-
-    def estimate_transform(self):
-        prev_pts = cv2.goodFeaturesToTrack(self.grayscale_buffer[-2], 200, 0.01, 30)
-        if prev_pts is None:
-            return 0, 0, 0
-
-        curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(self.grayscale_buffer[-2], self.grayscale_buffer[-1], prev_pts, None)
-        status = status.reshape(-1)
-
-        prev_pts = prev_pts[status == 1]
-        curr_pts = curr_pts[status == 1]
-
-        if len(prev_pts) < 10:
-            return 0, 0, 0
-
-        m, _ = cv2.estimateAffinePartial2D(prev_pts, curr_pts)
-        if m is None:
-            return 0, 0, 0
-
-        dx = m[0, 2]
-        dy = m[1, 2]
-        da = np.arctan2(m[1, 0], m[0, 0])
-
-        self.cumulative_motion += np.array([dx, dy, da])
-        self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
-
-
-    def make_grayscale(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.grayscale_buffer.append(self.make_grayscale(frame))
 
     def smooth_trajectory(self, alpha=0.02):
         current = self.cumulative_motion
@@ -70,9 +65,22 @@ class FrameStabilizer:
         self.prev_smooth_trajectory = smooth
         return smooth
 
+    def _init_buffers(self):
+        self.frame_buffer = deque(maxlen=self.buffer_size)
+        self.grayscale_buffer = deque(maxlen=self.buffer_size)
+        self.cumulative_motion_buffer = deque(maxlen=self.buffer_size)
+
+    def _append_last_motion_and_return(self):
+        self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
+        return
+
+    @staticmethod
+    def make_grayscale(frame):
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
     @staticmethod
     def build_affine(dx, dy, da):
         cos = np.cos(da)
         sin = np.sin(da)
         return np.array([[cos, -sin, dx],
-                         [sin,  cos, dy]], dtype=np.float32)
+                         [sin, cos, dy]], dtype=np.float32)
