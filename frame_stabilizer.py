@@ -22,44 +22,48 @@ class FrameStabilizer:
     def stabilize(self, frame):
         self.append_raw_frame(frame)
         if len(self.frame_buffer) > 1: self.estimate_frame_transform()
-        return self.smooth_frame()
+        return self.apply_trajectory_smoothing()
 
     def estimate_frame_transform(self):
         previous_points = cv2.goodFeaturesToTrack(self.grayscale_buffer[-2], MAX_CORNERS, QUALITY_LEVEL, MIN_DISTANCE)
-        if previous_points is None: self._append_last_motion_and_return()
+        if previous_points is None: return self._append_last_motion_and_return()
 
         current_points, status, _ = cv2.calcOpticalFlowPyrLK(self.grayscale_buffer[-2], self.grayscale_buffer[-1],
                                                              previous_points, None)
         status = np.squeeze(status)
         previous_points, current_points = (previous_points[status == 1], current_points[status == 1])
 
-        if len(previous_points) < MINIMUM_POINTS: self._append_last_motion_and_return()
+        if len(previous_points) < MINIMUM_POINTS: return self._append_last_motion_and_return()
 
         m, _ = cv2.estimateAffinePartial2D(previous_points, current_points)
-        if m is None: self._append_last_motion_and_return()
+        if m is None: return self._append_last_motion_and_return()
 
         dx = m[0, 2]
         dy = m[1, 2]
-        da = np.arctan2(m[1, 0], m[0, 0])
+        d_theta = np.arctan2(m[1, 0], m[0, 0])
 
-        self.cumulative_motion += np.array([dx, dy, da])
+        self.cumulative_motion += np.array([dx, dy, d_theta])
         self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
 
-    def smooth_frame(self):
-        correction = self.smooth_trajectory() - self.cumulative_motion
+    def apply_trajectory_smoothing(self):
+        if not self.frame_buffer:
+            raise ValueError("Frame buffer is empty — cannot stabilize frame.")
+
+        # Compute the difference between smoothed and actual motion
+        correction = self.compute_smoothed_motion() - self.cumulative_motion
         dx_c, dy_c, da_c = correction
 
         M = self.build_affine(dx_c, dy_c, da_c)
 
         frame_to_stabilize = self.frame_buffer[-1]
-        stabilized = cv2.warpAffine(frame_to_stabilize, M, (self.width, self.height))
-        return stabilized
+        stabilized_frame = cv2.warpAffine(frame_to_stabilize, M, (self.width, self.height))
+        return stabilized_frame
 
     def append_raw_frame(self, frame):
         self.frame_buffer.append(frame)
         self.grayscale_buffer.append(self.make_grayscale(frame))
 
-    def smooth_trajectory(self, alpha=0.02):
+    def compute_smoothed_motion(self, alpha=0.02):
         current = self.cumulative_motion
         smooth = alpha * current + (1 - alpha) * self.prev_smooth_trajectory
         self.prev_smooth_trajectory = smooth
@@ -72,7 +76,6 @@ class FrameStabilizer:
 
     def _append_last_motion_and_return(self):
         self.cumulative_motion_buffer.append(self.cumulative_motion.copy())
-        return
 
     @staticmethod
     def make_grayscale(frame):
